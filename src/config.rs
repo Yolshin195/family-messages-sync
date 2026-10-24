@@ -1,8 +1,14 @@
 //! Конфиг, состояние и пути.
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::IsTerminal, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 /// Имя записи в Keychain (сервис — `keychain_service` из конфига).
@@ -69,6 +75,14 @@ pub struct Config {
     /// Не создавать операцию, если такая же (счёт, направление, сумма, дата) уже внесена вручную
     pub skip_if_already_entered: bool,
 
+    /// `provider` связей SMS с операциями в бухгалтерии. Не менять без причины
+    pub provider: String,
+    /// Уведомление macOS на каждую созданную операцию
+    pub notify_created: bool,
+    /// Не заводить сообщение, полученное больше чем на N дней раньше последнего обработанного:
+    /// это подкачка истории iCloud, а не новое SMS. 0 — выключить
+    pub old_message_days: i64,
+
     /// Правила разбора, первое совпавшее побеждает
     pub rules: Vec<Rule>,
 }
@@ -101,6 +115,9 @@ impl Default for Config {
             delay_minutes: 10,
             date_tolerance_days: 1,
             skip_if_already_entered: true,
+            provider: "imessage".into(),
+            notify_created: true,
+            old_message_days: 2,
             rules: vec![
                 // "21/09/26 10:50 A/C X-5019 Withdrawal 60.00 Outstanding Balance 8,195.25 Baht."
                 Rule {
@@ -142,27 +159,44 @@ impl Config {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Claim {
-    /// id операции, которую уже «занял» один из SMS
-    pub id: String,
-    /// guid этого SMS
-    #[serde(default)]
-    pub guid: String,
-    /// дата операции YYYY-MM-DD — чтобы со временем забывать
-    pub date: String,
+/// Последняя ошибка `run` (для `status`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LastError {
+    pub text: String,
+    pub at: DateTime<Local>,
+    /// после неё был запуск без остановки
+    pub resolved: bool,
+}
+
+/// Последнее уведомление об остановке: чтобы не повторять его и сообщить, когда импорт заработает.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Alert {
+    /// первые 40 символов причины
+    pub reason: String,
+    pub at: DateTime<Local>,
+    /// импорт стоит: о восстановлении ещё не сообщали
+    pub stopped: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct State {
     pub last_rowid: Option<i64>,
-    /// Ручные операции, признанные «своими» для конкретного SMS: второй такой же SMS их не займёт
-    #[serde(default)]
-    pub claimed: Vec<Claim>,
     /// Сообщения, которые бухгалтерия отклонила (нет счёта, категории): повторяются при каждом запуске,
     /// пока не уйдут, чтобы после исправления настроек ничего не потерялось
     #[serde(default)]
     pub failed: Vec<i64>,
+    /// Время получения последнего обработанного сообщения от банка: старше него — подкачка истории
+    #[serde(default)]
+    pub last_received_at: Option<DateTime<Local>>,
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Local>>,
+    /// Последний запуск без остановки
+    #[serde(default)]
+    pub last_ok_at: Option<DateTime<Local>>,
+    #[serde(default)]
+    pub last_error: Option<LastError>,
+    #[serde(default)]
+    pub alert: Option<Alert>,
 }
 
 pub fn home() -> PathBuf {
@@ -204,14 +238,39 @@ pub fn load_config(setup: impl FnOnce() -> Result<()>) -> Result<(Config, bool)>
     Ok((cfg, setup_ran))
 }
 
-pub fn load_state() -> State {
-    fs::read_to_string(app_dir().join("state.json"))
+/// Состояние из `dir/state.json` (обычно `app_dir()`).
+pub fn load_state(dir: &Path) -> State {
+    fs::read_to_string(dir.join("state.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save_state(state: &State) -> Result<()> {
-    fs::write(app_dir().join("state.json"), serde_json::to_string(state)?)?;
+pub fn save_state(dir: &Path, state: &State) -> Result<()> {
+    // через временный файл: оборванная запись не сбросит позицию сообщений
+    let tmp = dir.join("state.json.tmp");
+    fs::write(&tmp, serde_json::to_string(state)?)?;
+    fs::rename(tmp, dir.join("state.json"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_state_with_claimed_is_read_and_claimed_is_dropped() {
+        let old = r#"{"last_rowid":48220,"claimed":[{"id":"a","guid":"G-1","date":"2026-09-21"}],"failed":[48190]}"#;
+        let state: State = serde_json::from_str(old).unwrap();
+        assert_eq!((state.last_rowid, state.failed.as_slice()), (Some(48220), &[48190][..]));
+        assert!(state.last_received_at.is_none() && state.alert.is_none());
+        let saved = serde_json::to_string(&state).unwrap();
+        assert!(!saved.contains("claimed"), "{saved}");
+    }
+
+    #[test]
+    fn new_config_fields_have_defaults() {
+        let cfg: Config = serde_json::from_str(r#"{"default_account":"CARD"}"#).unwrap();
+        assert_eq!((cfg.provider.as_str(), cfg.notify_created, cfg.old_message_days), ("imessage", true, 2));
+    }
 }

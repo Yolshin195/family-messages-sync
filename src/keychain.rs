@@ -6,10 +6,8 @@ use std::process::Command;
 use crate::config::{KEYCHAIN_ACCOUNT, NAME};
 
 pub fn get(service: &str) -> Result<String> {
-    if let Ok(t) = std::env::var("FAMILY_SYNC_TOKEN") {
-        if !t.trim().is_empty() {
-            return Ok(t.trim().to_string());
-        }
+    if let Some(t) = std::env::var("FAMILY_SYNC_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        return Ok(t);
     }
     let out = Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT, "-w"])

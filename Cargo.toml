@@ -6,7 +6,7 @@ description = "Банковские сообщения из Messages (macOS) -> 
 
 [dependencies]
 anyhow = "1"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
 regex = "1"

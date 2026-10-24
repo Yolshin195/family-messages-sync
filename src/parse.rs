@@ -31,6 +31,10 @@ impl Kind {
         }
     }
 
+    pub fn from_tx_kind(s: &str) -> Option<Self> {
+        [Self::Expense, Self::Income].into_iter().find(|k| k.tx_kind() == s)
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             Self::Expense => "расход",
