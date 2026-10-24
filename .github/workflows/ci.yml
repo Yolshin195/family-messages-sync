@@ -1,0 +1,71 @@
+# Проверки на каждый PR и пуш в main: форматирование (rustfmt), линтер (clippy, предупреждения — ошибки) и тесты.
+#
+# - Приложение работает только на macOS, поэтому clippy и тесты — на macOS-раннере (для публичного репозитория
+#   бесплатно). rustfmt от платформы не зависит и идёт на Linux.
+# - Изменения только в документации (*.md, docs/) CI не запускают.
+# - Новый пуш в ту же ветку отменяет незаконченный прогон.
+# - Кэш Rust пишет только main, PR его лишь читают.
+# Локально то же самое: make lint test.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format (rustfmt)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Lint (clippy)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked

@@ -1,0 +1,2 @@
+# Только форматирование (cargo fmt), без изменения поведения. Локально: git config blame.ignoreRevsFile .git-blame-ignore-revs
+f3c1f6288f82648aebd68d2765ac084da425d2f2

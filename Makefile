@@ -55,7 +55,7 @@ export PLIST_XML
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help build test install setup init dry fda plist agent deploy run-now status logs stop uninstall
+.PHONY: help build test lint fmt install setup init dry fda plist agent deploy run-now status logs stop uninstall
 
 help: ## Показать список команд
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-9s %s\n", $$1, $$2}'
@@ -65,6 +65,13 @@ build: ## Собрать release-бинарник
 
 test: ## Запустить тесты
 	cargo test
+
+lint: ## Проверки CI: форматирование и clippy (предупреждения — ошибки)
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+
+fmt: ## Отформатировать код (rustfmt.toml)
+	cargo fmt
 
 install: build ## Собрать и скопировать бинарник в ~/.local/bin
 	mkdir -p $(BIN_DIR)
