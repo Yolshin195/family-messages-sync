@@ -10,8 +10,8 @@
 //!   status            последний запуск, ошибка, очередь повторов, итоги за 7 дней
 //!
 //! Конфиг, состояние и журнал: ~/.config/family-messages-sync/{config.json,state.json,app.db}
-//! Логи (unparsed.log, failed.log, out.log и err.log launchd) не растут больше 2 МБ: см. logs.rs
 //! (имя каталога и сервиса Keychain берётся из имени пакета в Cargo.toml)
+//! Логи (unparsed.log, failed.log, out.log и err.log launchd) не растут больше 2 МБ: см. logs.rs
 
 mod api;
 mod config;
