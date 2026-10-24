@@ -20,6 +20,7 @@ GUI        := gui/$(shell id -u)
 
 # LaunchAgent: запуск при входе в систему и каждые $(INTERVAL) секунд.
 # Во сне launchd не работает, после пробуждения сообщения догоняются.
+# Ротации у launchd нет: out.log и err.log больше 1 МБ приложение само переносит в .1 (FAMILY_SYNC_LOG_DIR, src/logs.rs).
 define PLIST_XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -42,6 +43,11 @@ define PLIST_XML
   <string>$(LOG_DIR)/out.log</string>
   <key>StandardErrorPath</key>
   <string>$(LOG_DIR)/err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FAMILY_SYNC_LOG_DIR</key>
+    <string>$(LOG_DIR)</string>
+  </dict>
 </dict>
 </plist>
 endef
@@ -106,7 +112,7 @@ status: ## Состояние автозапуска и импорта
 
 logs: ## Смотреть логи (Ctrl+C для выхода)
 	@mkdir -p $(LOG_DIR) && touch $(LOG_DIR)/out.log $(LOG_DIR)/err.log
-	tail -n 50 -f $(LOG_DIR)/out.log $(LOG_DIR)/err.log
+	tail -n 50 -F $(LOG_DIR)/out.log $(LOG_DIR)/err.log
 
 stop: ## Выключить автозапуск
 	-launchctl bootout $(GUI)/$(LABEL)

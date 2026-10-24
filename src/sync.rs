@@ -4,13 +4,14 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, SubsecRound};
 use serde_json::{Value, json};
-use std::{cell::RefCell, fs, io::Write, path::Path};
+use std::{cell::RefCell, fs, path::Path};
 
 use crate::{
     api::{Api, Ledger, Reply},
     config::{Config, LastError, NAME, State, app_dir, load_state, save_state},
     dedupe::{Probe, Verdict, judge},
     journal::{Entry, Journal, Status},
+    logs,
     messages::{Msg, fetch_messages, max_rowid, open_db},
     notify::{self, MacNotifier, Notifier, TITLE, short},
     parse::{Kind, Matcher, Parsed},
@@ -88,9 +89,7 @@ fn operation_date(m: &Matcher, msg: &Msg) -> NaiveDate {
 }
 
 fn log_line(dir: &Path, file: &str, line: &str) -> Result<()> {
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(dir.join(file))?;
-    writeln!(f, "{line}")?;
-    Ok(())
+    Ok(logs::append(&dir.join(file), line)?)
 }
 
 /// Последняя колонка журнала: ссылка на операцию, иначе причина, у нераспознанных — начало текста.

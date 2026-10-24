@@ -122,7 +122,7 @@ pub fn cmd_reset(yes: bool) -> Result<()> {
     if let Some(cfg) = read_config() {
         keychain::delete(&cfg.keychain_service);
     }
-    for f in ["config.json", "state.json", "app.db", "unparsed.log", "failed.log"] {
+    for f in ["config.json", "state.json", "app.db", "unparsed.log", "failed.log", "unparsed.log.1", "failed.log.1"] {
         let _ = fs::remove_file(app_dir().join(f));
     }
     println!("Конфигурация удалена.");
