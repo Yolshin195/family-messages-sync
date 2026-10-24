@@ -122,16 +122,18 @@ pub fn cmd_reset(yes: bool) -> Result<()> {
     if let Some(cfg) = read_config() {
         keychain::delete(&cfg.keychain_service);
     }
-    for f in ["config.json", "state.json", "unparsed.log", "failed.log"] {
+    for f in ["config.json", "state.json", "app.db", "unparsed.log", "failed.log"] {
         let _ = fs::remove_file(app_dir().join(f));
     }
     println!("Конфигурация удалена.");
     cmd_setup()
 }
 
-/// Проверка связи: токен, категории для автоматических операций (создаются, если их нет), счета.
+/// Проверка связи: токен, версия бухгалтерии, категории для автоматических операций (создаются, если их нет), счета.
 pub fn cmd_init(cfg: &Config) -> Result<()> {
     let api = Api::new(cfg)?;
+    api.check_external_refs()?;
+    println!("бухгалтерия: связи SMS поддерживаются (ок)");
     api.ensure_category(&cfg.expense_category, "EXPENSE")?;
     api.ensure_category(&cfg.income_category, "INCOME")?;
     let codes = cfg.account_codes();

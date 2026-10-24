@@ -100,8 +100,9 @@ deploy: install ## Установка, настройка, доступ и ав�
 run-now: ## Запустить обработку прямо сейчас через launchd
 	launchctl kickstart -k $(GUI)/$(LABEL)
 
-status: ## Состояние автозапуска
+status: ## Состояние автозапуска и импорта
 	@launchctl print $(GUI)/$(LABEL) 2>/dev/null | grep -E '^[[:space:]]*(state|runs|last exit code) =' || echo "Агент не загружен"
+	@$(BIN) status
 
 logs: ## Смотреть логи (Ctrl+C для выхода)
 	@mkdir -p $(LOG_DIR) && touch $(LOG_DIR)/out.log $(LOG_DIR)/err.log
