@@ -89,7 +89,9 @@ impl Api {
     pub fn new(cfg: &Config) -> Result<Self> {
         let token = keychain::get(&cfg.keychain_service)?;
         if !token.starts_with("fbt_") {
-            bail!("Это не похоже на API-токен: он начинается с fbt_. Создайте его в «Профиль → Безопасность» и выполните set-token");
+            bail!(
+                "Это не похоже на API-токен: он начинается с fbt_. Создайте его в «Профиль → Безопасность» и выполните set-token"
+            );
         }
         Self::connect(cfg, token, Client::builder())
     }
@@ -103,7 +105,13 @@ impl Api {
         })
     }
 
-    fn call(&self, method: Method, path: &str, query: &[(&str, String)], body: Option<&Value>) -> Result<(u16, String)> {
+    fn call(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<(u16, String)> {
         let mut rb = self.http.request(method, format!("{}{}", self.base, path)).bearer_auth(&self.token);
         if !query.is_empty() {
             rb = rb.query(query);
@@ -118,7 +126,9 @@ impl Api {
     /// Ошибки доступа, одинаковые для всех запросов.
     fn access_error(path: &str, status: u16, body: &str) -> Option<anyhow::Error> {
         match status {
-            401 => Some(anyhow!("{path}: 401 токен недействителен, истёк или отозван. Создайте новый и выполните set-token")),
+            401 => Some(anyhow!(
+                "{path}: 401 токен недействителен, истёк или отозван. Создайте новый и выполните set-token"
+            )),
             403 => Some(anyhow!(
                 "{path}: 403 у токена нет нужного права ({body}). Для `run` достаточно transactions:write, для `init` нужен write: \
                  выдайте его на время настройки или создайте категории в приложении вручную"
@@ -130,7 +140,13 @@ impl Api {
     }
 
     /// Запрос с проверкой ошибок доступа.
-    fn send(&self, method: Method, path: &str, query: &[(&str, String)], body: Option<&Value>) -> Result<(u16, String)> {
+    fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<(u16, String)> {
         let (st, text) = self.call(method, path, query, body)?;
         match Self::access_error(path, st, &text) {
             Some(e) => Err(e),
@@ -170,8 +186,13 @@ impl Api {
         match st {
             200 => {
                 let v: Value = serde_json::from_str(&body).with_context(|| format!("{path}: ответ не JSON: {body}"))?;
-                let id = v["transaction_id"].as_str().with_context(|| format!("{path}: в ответе нет transaction_id: {body}"))?;
-                Ok(Some(Link { transaction_id: id.to_string(), transaction_exists: v["transaction_exists"].as_bool().unwrap_or(true) }))
+                let id = v["transaction_id"]
+                    .as_str()
+                    .with_context(|| format!("{path}: в ответе нет transaction_id: {body}"))?;
+                Ok(Some(Link {
+                    transaction_id: id.to_string(),
+                    transaction_exists: v["transaction_exists"].as_bool().unwrap_or(true),
+                }))
             }
             404 => Ok(None),
             _ => bail!("{path}: {st} {body}"),
@@ -240,7 +261,9 @@ impl Api {
         let (st, body) = self.call(Method::POST, "/api/categories", &[], Some(&payload))?;
         match st {
             200 | 201 => println!("категория {code}: создана"),
-            403 => bail!("категория {code} не создана: у токена нет права записи в категории. Создайте её в приложении (тип {kind}) или выдайте токену право write"),
+            403 => bail!(
+                "категория {code} не создана: у токена нет права записи в категории. Создайте её в приложении (тип {kind}) или выдайте токену право write"
+            ),
             _ => bail!("категория {code}: {st} {body}"),
         }
         Ok(())
@@ -346,8 +369,10 @@ mod tests {
         json!({"tx_kind": "EXPENSE", "external_ref": ext()})
     }
 
-    const LINK_GONE: &str = r#"{"provider":"imessage","external_id":"G-1","transaction_id":"t9","transaction_exists":false}"#;
-    const LINK_LIVE: &str = r#"{"provider":"imessage","external_id":"G-1","transaction_id":"t9","transaction_exists":true}"#;
+    const LINK_GONE: &str =
+        r#"{"provider":"imessage","external_id":"G-1","transaction_id":"t9","transaction_exists":false}"#;
+    const LINK_LIVE: &str =
+        r#"{"provider":"imessage","external_id":"G-1","transaction_id":"t9","transaction_exists":true}"#;
     const NOT_FOUND: &str = r#"{"error":"NOT_FOUND","message":"не найдено"}"#;
 
     #[test]
@@ -416,11 +441,17 @@ mod tests {
         let tx = r#"{"id":"a","tx_kind":"EXPENSE","account_code":"CARD","total":"60.00","occurred_on":"2026-09-21","items":[]"#;
         let d = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
 
-        let (api, rx) = serve(vec![(200, page(&format!(r#"{tx},"external_refs":[{{"provider":"imessage","external_id":"G-1"}}]}}"#)))]);
+        let (api, rx) = serve(vec![(
+            200,
+            page(&format!(r#"{tx},"external_refs":[{{"provider":"imessage","external_id":"G-1"}}]}}"#)),
+        )]);
         let got = api.transactions_around("CARD", d, d).unwrap();
         assert_eq!(got[0].sms_guids, ["G-1"]);
         let req = rx.recv().unwrap();
-        assert!(req.starts_with("GET /api/transactions?from=2026-09-21&to=2026-09-21&account_code=CARD&page=0&size=200"), "{req}");
+        assert!(
+            req.starts_with("GET /api/transactions?from=2026-09-21&to=2026-09-21&account_code=CARD&page=0&size=200"),
+            "{req}"
+        );
 
         let (api, _) = serve(vec![(200, page(&format!("{tx}}}")))]);
         assert_eq!(api.transactions_around("CARD", d, d).unwrap_err().to_string(), OLD_BUDGET);

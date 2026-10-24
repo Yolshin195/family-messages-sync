@@ -111,8 +111,7 @@ CREATE INDEX IF NOT EXISTS messages_guid ON messages (guid);
 PRAGMA user_version = 1;
 ";
 
-const COLUMNS: &str =
-    "rowid, guid, sender, received_at, text, status, reason, kind, amount, account_code, occurred_on, transaction_id, processed_at";
+const COLUMNS: &str = "rowid, guid, sender, received_at, text, status, reason, kind, amount, account_code, occurred_on, transaction_id, processed_at";
 
 /// Время в журнале: RFC 3339 до секунд, местное время Mac. Строки одного вида сравниваются как время.
 fn ts(t: DateTime<Local>) -> String {
@@ -141,7 +140,10 @@ fn entry(r: &Row) -> rusqlite::Result<Entry> {
         kind: r.get::<_, Option<String>>(7)?.as_deref().and_then(Kind::from_tx_kind),
         amount: r.get(8)?,
         account_code: r.get(9)?,
-        occurred_on: occurred_on.map(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d")).transpose().map_err(|e| bad_value(10, e))?,
+        occurred_on: occurred_on
+            .map(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d"))
+            .transpose()
+            .map_err(|e| bad_value(10, e))?,
         transaction_id: r.get(11)?,
         processed_at: time(12)?,
     })
@@ -208,7 +210,8 @@ impl Journal {
             "SELECT {COLUMNS} FROM messages WHERE ?1 IS NULL OR status = ?1 ORDER BY received_at DESC, rowid DESC LIMIT ?2"
         ))?;
         let limit = i64::try_from(n).unwrap_or(i64::MAX);
-        let mut out = stmt.query_map(params![status.map(Status::code), limit], entry)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out =
+            stmt.query_map(params![status.map(Status::code), limit], entry)?.collect::<rusqlite::Result<Vec<_>>>()?;
         out.reverse();
         Ok(out)
     }
@@ -232,7 +235,8 @@ impl Journal {
 
     /// Сколько сообщений с каждым итогом получено начиная с `since`.
     pub fn counts_since(&self, since: DateTime<Local>) -> Result<Vec<(Status, i64)>> {
-        let mut stmt = self.0.prepare("SELECT status, count(*) FROM messages WHERE received_at >= ?1 GROUP BY status")?;
+        let mut stmt =
+            self.0.prepare("SELECT status, count(*) FROM messages WHERE received_at >= ?1 GROUP BY status")?;
         let rows = stmt.query_map([ts(since)], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {

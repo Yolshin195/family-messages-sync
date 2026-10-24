@@ -80,7 +80,8 @@ pub fn cmd_setup() -> Result<()> {
     cfg.default_account = ask_required("Счёт по умолчанию", &cfg.default_account)?.to_uppercase();
     println!("Если SMS приходят с нескольких счетов: последние цифры из SMS (A/C X-5019) = код счёта.");
     loop {
-        match parse_accounts(&ask("Соответствие счетов (через запятую, можно пусто)", &format_accounts(&cfg.accounts))?) {
+        match parse_accounts(&ask("Соответствие счетов (через запятую, можно пусто)", &format_accounts(&cfg.accounts))?)
+        {
             Ok(m) => {
                 cfg.accounts = m;
                 break;
@@ -88,8 +89,10 @@ pub fn cmd_setup() -> Result<()> {
             Err(e) => println!("{e}"),
         }
     }
-    cfg.expense_category.code = ask_required("Категория для автоматических расходов", &cfg.expense_category.code)?.to_uppercase();
-    cfg.income_category.code = ask_required("Категория для автоматических доходов", &cfg.income_category.code)?.to_uppercase();
+    cfg.expense_category.code =
+        ask_required("Категория для автоматических расходов", &cfg.expense_category.code)?.to_uppercase();
+    cfg.income_category.code =
+        ask_required("Категория для автоматических доходов", &cfg.income_category.code)?.to_uppercase();
 
     write_config(&cfg)?;
     println!("Конфиг сохранён: {}", config_path().display());

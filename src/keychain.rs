@@ -36,7 +36,5 @@ pub fn set(service: &str) -> Result<()> {
 }
 
 pub fn delete(service: &str) {
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT])
-        .output();
+    let _ = Command::new("security").args(["delete-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT]).output();
 }

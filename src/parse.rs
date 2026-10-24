@@ -139,7 +139,9 @@ mod tests {
     #[test]
     fn transfer_uses_source_account() {
         let p = matcher()
-            .parse("20/09/26 21:26 A/C X-5019 transferred 120.00 Baht to A/C X-8842 Outstanding Balance 10,002.25 Baht.")
+            .parse(
+                "20/09/26 21:26 A/C X-5019 transferred 120.00 Baht to A/C X-8842 Outstanding Balance 10,002.25 Baht.",
+            )
             .unwrap();
         assert_eq!((p.kind, p.amount, p.account_hint.as_deref()), (Kind::Expense, dec("120.00"), Some("5019")));
     }

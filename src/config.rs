@@ -234,16 +234,14 @@ pub fn load_config(setup: impl FnOnce() -> Result<()>) -> Result<(Config, bool)>
         setup()?;
         setup_ran = true;
     }
-    let cfg = serde_json::from_str(&fs::read_to_string(&path)?).with_context(|| format!("разбор {}", path.display()))?;
+    let cfg =
+        serde_json::from_str(&fs::read_to_string(&path)?).with_context(|| format!("разбор {}", path.display()))?;
     Ok((cfg, setup_ran))
 }
 
 /// Состояние из `dir/state.json` (обычно `app_dir()`).
 pub fn load_state(dir: &Path) -> State {
-    fs::read_to_string(dir.join("state.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    fs::read_to_string(dir.join("state.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save_state(dir: &Path, state: &State) -> Result<()> {
