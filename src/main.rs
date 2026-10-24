@@ -11,12 +11,14 @@
 //!
 //! Конфиг, состояние и журнал: ~/.config/family-messages-sync/{config.json,state.json,app.db}
 //! (имя каталога и сервиса Keychain берётся из имени пакета в Cargo.toml)
+//! Логи (unparsed.log, failed.log, out.log и err.log launchd) не растут больше 2 МБ: см. logs.rs
 
 mod api;
 mod config;
 mod dedupe;
 mod journal;
 mod keychain;
+mod logs;
 mod messages;
 mod notify;
 mod parse;
@@ -97,6 +99,10 @@ fn main() -> Result<()> {
             None => return Ok(()),
         },
     };
+    // до конфига: если он не читается, err.log пополняется каждый запуск
+    if matches!(cli.cmd, Cmd::Run { .. }) {
+        logs::rotate_launchd();
+    }
     let cfg = match prepare(&cli.cmd) {
         Ok(Some(cfg)) => cfg,
         Ok(None) => return Ok(()),

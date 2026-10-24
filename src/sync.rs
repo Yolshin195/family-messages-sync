@@ -4,13 +4,14 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, SubsecRound};
 use serde_json::{Value, json};
-use std::{cell::RefCell, fs, io::Write, path::Path};
+use std::{cell::RefCell, fs, path::Path};
 
 use crate::{
     api::{Api, Ledger, Reply},
     config::{Config, LastError, NAME, State, app_dir, load_state, save_state},
     dedupe::{Probe, Verdict, judge},
     journal::{Entry, Journal, Status},
+    logs,
     messages::{Msg, fetch_messages, max_rowid, open_db},
     notify::{self, MacNotifier, Notifier, TITLE, short},
     parse::{Kind, Matcher, Parsed},
@@ -88,9 +89,7 @@ fn operation_date(m: &Matcher, msg: &Msg) -> NaiveDate {
 }
 
 fn log_line(dir: &Path, file: &str, line: &str) -> Result<()> {
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(dir.join(file))?;
-    writeln!(f, "{line}")?;
-    Ok(())
+    Ok(logs::append(&dir.join(file), line)?)
 }
 
 /// Последняя колонка журнала: ссылка на операцию, иначе причина, у нераспознанных — начало текста.
@@ -115,7 +114,8 @@ fn entry_line(e: &Entry, label: &str, api_url: &str) -> String {
         _ => "—".into(),
     };
     let rowid = format!("#{}", e.rowid);
-    let line = format!("{rowid:<7} {}  {what:<31}  {label:<16} {}", e.received_at.format("%d.%m %H:%M"), detail(e, api_url));
+    let line =
+        format!("{rowid:<7} {}  {what:<31}  {label:<16} {}", e.received_at.format("%d.%m %H:%M"), detail(e, api_url));
     line.trim_end().to_string()
 }
 
@@ -221,10 +221,16 @@ fn status_text(state: &State, counts: &[(Status, i64)]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    [("Последний запуск:", run), ("Последняя ошибка:", error), ("Последнее SMS:", sms), ("Очередь повторов:", queue), ("За 7 дней:", week)]
-        .iter()
-        .map(|(k, v)| format!("{k:<19}{v}\n"))
-        .collect()
+    [
+        ("Последний запуск:", run),
+        ("Последняя ошибка:", error),
+        ("Последнее SMS:", sms),
+        ("Очередь повторов:", queue),
+        ("За 7 дней:", week),
+    ]
+    .iter()
+    .map(|(k, v)| format!("{k:<19}{v}\n"))
+    .collect()
 }
 
 /// Только state.json и app.db: без бухгалтерии и chat.db, работает и без Full Disk Access.
@@ -272,7 +278,9 @@ fn outcome(s: Reply) -> (Status, Option<String>, Option<String>) {
         Reply::Created(id) => (Status::Created, Some(id), None),
         Reply::Matched(id) => (Status::Matched, Some(id), None),
         Reply::AlreadySent(id) => (Status::AlreadySent, Some(id), None),
-        Reply::Deleted(id) => (Status::Deleted, id, Some("операцию по этому SMS удалили в бухгалтерии: не заводится".into())),
+        Reply::Deleted(id) => {
+            (Status::Deleted, id, Some("операцию по этому SMS удалили в бухгалтерии: не заводится".into()))
+        }
         Reply::Rejected(why) => (Status::Rejected, None, Some(why)),
         // перебор кандидатов не возвращает Gone; если всё же — повторим в следующий раз
         Reply::Gone => (Status::Rejected, None, Some("операцию удалили во время обработки".into())),
@@ -300,7 +308,10 @@ impl Run<'_> {
     /// Старое сообщение: получено намного раньше последнего обработанного — подкачка истории iCloud, а не новое SMS.
     fn is_old(&self, msg: &Msg, state: &State, retry: bool) -> bool {
         let days = self.cfg.old_message_days;
-        self.cutoff && !retry && days > 0 && state.last_received_at.is_some_and(|last| msg.date < last - Duration::days(days))
+        self.cutoff
+            && !retry
+            && days > 0
+            && state.last_received_at.is_some_and(|last| msg.date < last - Duration::days(days))
     }
 
     /// Одно сообщение. `retry` — оно из очереди повторов. `Err` — остановка (сеть, сервер, токен): повторим в следующий запуск.
@@ -315,8 +326,13 @@ impl Run<'_> {
             return Ok(Outcome::Done(Box::new(entry(msg, Status::Unrecognized, self.now))));
         };
         // Свежее сообщение подождёт: вдруг вы сейчас вносите его руками
-        if self.cfg.delay_minutes > 0 && self.now.signed_duration_since(msg.date) < Duration::minutes(self.cfg.delay_minutes) {
-            println!("Сообщение #{} свежее (меньше {} мин), вернёмся к нему в следующий раз.", msg.rowid, self.cfg.delay_minutes);
+        if self.cfg.delay_minutes > 0
+            && self.now.signed_duration_since(msg.date) < Duration::minutes(self.cfg.delay_minutes)
+        {
+            println!(
+                "Сообщение #{} свежее (меньше {} мин), вернёмся к нему в следующий раз.",
+                msg.rowid, self.cfg.delay_minutes
+            );
             return Ok(Outcome::Wait);
         }
         let date = operation_date(self.m, msg);
@@ -334,7 +350,10 @@ impl Run<'_> {
         }
         let Some(account) = account else {
             e.status = Status::Rejected;
-            e.reason = Some(format!("не определён счёт (цифры в SMS: {:?}); задайте default_account или accounts", p.account_hint));
+            e.reason = Some(format!(
+                "не определён счёт (цифры в SMS: {:?}); задайте default_account или accounts",
+                p.account_hint
+            ));
             return Ok(Outcome::Done(Box::new(e)));
         };
         (e.status, e.transaction_id, e.reason) = self.send(msg, &p, &account, date)?;
@@ -342,10 +361,18 @@ impl Run<'_> {
     }
 
     /// Найти SMS в бухгалтерии или ручную операцию для него, иначе создать.
-    fn send(&self, msg: &Msg, p: &Parsed, account: &str, date: NaiveDate) -> Result<(Status, Option<String>, Option<String>)> {
+    fn send(
+        &self,
+        msg: &Msg,
+        p: &Parsed,
+        account: &str,
+        date: NaiveDate,
+    ) -> Result<(Status, Option<String>, Option<String>)> {
         let tol = self.cfg.date_tolerance_days.max(0);
-        let mut existing = self.ledger.transactions_around(account, date - Duration::days(tol), date + Duration::days(tol))?;
-        let probe = Probe { guid: msg.guid.clone(), kind: p.kind, amount: p.amount, account: account.to_string(), date };
+        let mut existing =
+            self.ledger.transactions_around(account, date - Duration::days(tol), date + Duration::days(tol))?;
+        let probe =
+            Probe { guid: msg.guid.clone(), kind: p.kind, amount: p.amount, account: account.to_string(), date };
         let verdict = {
             let links = self.dry_links.borrow();
             for (id, guid, _) in links.iter() {
@@ -353,7 +380,9 @@ impl Run<'_> {
                     t.sms_guids.push(guid.clone());
                 }
             }
-            let side = |g: &str| links.iter().find(|l| l.1 == g).map(|l| l.2).or_else(|| self.journal.kind_of(g).ok().flatten());
+            let side = |g: &str| {
+                links.iter().find(|l| l.1 == g).map(|l| l.2).or_else(|| self.journal.kind_of(g).ok().flatten())
+            };
             judge(&existing, &probe, tol, self.cfg.skip_if_already_entered, side)
         };
         match verdict {
@@ -392,7 +421,11 @@ impl Run<'_> {
     fn record(&self, msg: &Msg, e: &Entry, state: &mut State) -> Result<()> {
         println!("{}", entry_line(e, self.label(e), &self.cfg.api_url));
         if e.status == Status::Unrecognized && !self.dry {
-            log_line(self.dir, "unparsed.log", &format!("{}\t#{}\t{:?}", msg.date.format("%F %T"), msg.rowid, msg.text))?;
+            log_line(
+                self.dir,
+                "unparsed.log",
+                &format!("{}\t#{}\t{:?}", msg.date.format("%F %T"), msg.rowid, msg.text),
+            )?;
         }
         if e.status == Status::Rejected {
             let why = e.reason.as_deref().unwrap_or_default();
@@ -403,7 +436,11 @@ impl Run<'_> {
                     eprintln!("  сообщению больше {RETRY_DAYS} дней: больше не повторяю, внесите вручную");
                 } else if !state.failed.contains(&msg.rowid) {
                     state.failed.push(msg.rowid);
-                    log_line(self.dir, "failed.log", &format!("{}\t#{}\t{why}\t{:?}", msg.date.format("%F %T"), msg.rowid, msg.text))?;
+                    log_line(
+                        self.dir,
+                        "failed.log",
+                        &format!("{}\t#{}\t{why}\t{:?}", msg.date.format("%F %T"), msg.rowid, msg.text),
+                    )?;
                     eprintln!("  оставлено в очереди: повторю при следующем запуске, когда поправите настройки");
                     self.notifier.notify(TITLE, &format!("SMS не заведено: {}. См. failed.log", short(why, 80)));
                 }
@@ -451,7 +488,8 @@ impl Run<'_> {
             }
         }
         if old > OLD_ALERT && !self.dry {
-            let text = format!("Пропущено {old} старых SMS — похоже на подкачку истории. Список: {NAME} log --status old");
+            let text =
+                format!("Пропущено {old} старых SMS — похоже на подкачку истории. Список: {NAME} log --status old");
             self.notifier.notify(TITLE, &text);
         }
         failure.map_or(Ok(()), Err)
@@ -551,7 +589,14 @@ mod tests {
     }
 
     fn msg(text: &str) -> Msg {
-        Msg { rowid: 1, guid: "G-1".into(), text: text.into(), date: at(21, 10, 51), handle: "KBank".into(), bank: true }
+        Msg {
+            rowid: 1,
+            guid: "G-1".into(),
+            text: text.into(),
+            date: at(21, 10, 51),
+            handle: "KBank".into(),
+            bank: true,
+        }
     }
 
     fn msg_n(rowid: i64, text: &str, date: DateTime<Local>) -> Msg {
@@ -559,11 +604,17 @@ mod tests {
     }
 
     fn parsed() -> Parsed {
-        Parsed { kind: Kind::Expense, amount: Decimal::from_str("60.00").unwrap(), merchant: String::new(), account_hint: Some("5019".into()) }
+        Parsed {
+            kind: Kind::Expense,
+            amount: Decimal::from_str("60.00").unwrap(),
+            merchant: String::new(),
+            account_hint: Some("5019".into()),
+        }
     }
 
     fn cfg() -> Config {
-        let mut cfg = Config { default_account: "CARD".into(), api_url: "https://budget.example".into(), ..Config::default() };
+        let mut cfg =
+            Config { default_account: "CARD".into(), api_url: "https://budget.example".into(), ..Config::default() };
         cfg.accounts.insert("5019".into(), "CARD_KBANK".into());
         cfg
     }
@@ -701,7 +752,10 @@ mod tests {
         let mut p = parsed();
         p.kind = Kind::Income;
         let v = build_payload(&Config::default(), &p, &msg("x"), "CARD", d);
-        assert_eq!((v["tx_kind"].as_str(), v["items"][0]["category_code"].as_str()), (Some("INCOME"), Some("AUTO_INCOME")));
+        assert_eq!(
+            (v["tx_kind"].as_str(), v["items"][0]["category_code"].as_str()),
+            (Some("INCOME"), Some("AUTO_INCOME"))
+        );
     }
 
     #[test]
@@ -725,7 +779,10 @@ mod tests {
         assert_eq!((e.amount.as_deref(), e.account_code.as_deref()), (Some("60.00"), Some("CARD_KBANK")));
         assert!(fake.calls().is_empty(), "старое не уходит в бухгалтерию");
         // в пределах old_message_days — не старое
-        assert_eq!(done(run.process(&msg_n(6, WITHDRAWAL, at(19, 12, 0)), &state, false).unwrap()).status, Status::Created);
+        assert_eq!(
+            done(run.process(&msg_n(6, WITHDRAWAL, at(19, 12, 0)), &state, false).unwrap()).status,
+            Status::Created
+        );
         // из очереди повторов — не отсекается
         assert_eq!(done(run.process(&old, &state, true).unwrap()).status, Status::Created);
         // последнего времени ещё нет
@@ -742,7 +799,10 @@ mod tests {
     #[test]
     fn candidates_are_tried_in_order_then_created() {
         let env = Env::new("candidates");
-        let mut fake = Fake { existing: vec![manual("far", "CARD_KBANK", "2026-09-22"), manual("near", "CARD_KBANK", "2026-09-21")], ..Fake::default() };
+        let mut fake = Fake {
+            existing: vec![manual("far", "CARD_KBANK", "2026-09-22"), manual("near", "CARD_KBANK", "2026-09-21")],
+            ..Fake::default()
+        };
         fake.attach.insert("near".into(), Reply::Gone);
         let e = done(env.run(&fake, false).process(&msg(WITHDRAWAL), &State::default(), false).unwrap());
         assert_eq!((e.status, e.transaction_id.as_deref()), (Status::Matched, Some("far")));
@@ -780,7 +840,8 @@ mod tests {
         let fake = Fake { existing: vec![manual("a", "CARD_KBANK", "2026-09-21")], ..Fake::default() };
         let run = env.run(&fake, true);
         let mut state = State { last_rowid: Some(0), ..State::default() };
-        run.process_all(&[msg_n(1, WITHDRAWAL, at(21, 10, 51)), msg_n(2, WITHDRAWAL, at(21, 10, 55))], &mut state).unwrap();
+        run.process_all(&[msg_n(1, WITHDRAWAL, at(21, 10, 51)), msg_n(2, WITHDRAWAL, at(21, 10, 55))], &mut state)
+            .unwrap();
         // одна ручная операция — одно SMS: второе «будет создано»
         assert_eq!(fake.calls(), ["A1 CARD_KBANK", "A1 CARD_KBANK"]);
         assert!(env.journal.last(10, None).unwrap().is_empty());
@@ -827,7 +888,10 @@ mod tests {
     #[test]
     fn rejected_goes_to_queue_and_notifies_once() {
         let env = Env::new("rejected");
-        let fake = Fake { create: RefCell::new(Some(Reply::Rejected("422 категория AUTO_EXPENSE не найдена".into()))), ..Fake::default() };
+        let fake = Fake {
+            create: RefCell::new(Some(Reply::Rejected("422 категория AUTO_EXPENSE не найдена".into()))),
+            ..Fake::default()
+        };
         let m = msg_n(7, WITHDRAWAL, at(21, 10, 51));
         let mut state = State { last_rowid: Some(6), ..State::default() };
         env.run(&fake, false).process_all(std::slice::from_ref(&m), &mut state).unwrap();
@@ -862,7 +926,10 @@ mod tests {
         let mut state = State { last_rowid: Some(0), last_received_at: Some(at(21, 10, 0)), ..State::default() };
         env.run(&fake, false).process_all(&msgs, &mut state).unwrap();
         assert_eq!(env.journal.last(100, Some(Status::Old)).unwrap().len(), 21);
-        assert_eq!(env.notes.texts(), [format!("Пропущено 21 старых SMS — похоже на подкачку истории. Список: {NAME} log --status old")]);
+        assert_eq!(
+            env.notes.texts(),
+            [format!("Пропущено 21 старых SMS — похоже на подкачку истории. Список: {NAME} log --status old")]
+        );
         assert!(fake.calls().is_empty());
     }
 
@@ -909,7 +976,11 @@ mod tests {
             entry_line(&rejected, rejected.status.label(), url),
             "#48211  21.09 10:51  доход   500.00 CARD_KBANK 21.09  отклонено        422 категория AUTO_INCOME не найдена"
         );
-        let unknown = entry(&msg_n(48220, "Your statement is ready for download in K PLUS", at(21, 13, 2)), Status::Unrecognized, at(21, 13, 15));
+        let unknown = entry(
+            &msg_n(48220, "Your statement is ready for download in K PLUS", at(21, 13, 2)),
+            Status::Unrecognized,
+            at(21, 13, 15),
+        );
         assert_eq!(
             entry_line(&unknown, unknown.status.label(), url),
             "#48220  21.09 13:02  —                                не распознано    «Your statement is ready for download in…»"
@@ -925,7 +996,9 @@ mod tests {
             last_received_at: t(21, 13, 2),
             last_run_at: t(24, 14, 5),
             last_ok_at: t(24, 14, 5),
-            last_error: Some(LastError { text: "401 токен недействителен".into(), at: at(23, 9, 10), resolved: true }),
+            last_error: Some(LastError {
+                text: "401 токен недействителен".into(), at: at(23, 9, 10), resolved: true
+            }),
             alert: None,
         };
         let counts = [(Status::Created, 12), (Status::Matched, 30), (Status::Unrecognized, 1), (Status::Rejected, 1)];
@@ -945,6 +1018,9 @@ mod tests {
             last_ok_at: t(23, 9, 0),
             ..state
         };
-        assert!(status_text(&failed, &[]).starts_with("Последний запуск:  24.09 14:05 — остановка (последний успешный 23.09 09:00)\n"));
+        assert!(
+            status_text(&failed, &[])
+                .starts_with("Последний запуск:  24.09 14:05 — остановка (последний успешный 23.09 09:00)\n")
+        );
     }
 }

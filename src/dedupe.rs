@@ -61,7 +61,8 @@ impl Existing {
             .filter(|r| r["provider"].as_str() == Some(provider))
             .filter_map(|r| r["external_id"].as_str().map(str::to_string));
         let notes = v["items"].as_array().into_iter().flatten().filter_map(|i| i["note"].as_str());
-        let marks = notes.chain(v["description"].as_str()).flat_map(|t| MARKER.captures_iter(t)).map(|c| c[1].to_string());
+        let marks =
+            notes.chain(v["description"].as_str()).flat_map(|t| MARKER.captures_iter(t)).map(|c| c[1].to_string());
         let mut sms_guids: Vec<String> = Vec::new();
         for g in refs.chain(marks) {
             if !sms_guids.contains(&g) {
@@ -141,7 +142,13 @@ pub enum Verdict {
 }
 
 /// `side` — направление уже прикреплённого SMS по его guid (из журнала), если известно.
-pub fn judge(existing: &[Existing], p: &Probe, tolerance_days: i64, skip_entered: bool, side: impl Fn(&str) -> Option<Kind>) -> Verdict {
+pub fn judge(
+    existing: &[Existing],
+    p: &Probe,
+    tolerance_days: i64,
+    skip_entered: bool,
+    side: impl Fn(&str) -> Option<Kind>,
+) -> Verdict {
     if let Some(e) = existing.iter().find(|e| e.has_sms(&p.guid)) {
         return Verdict::AlreadySent(e.id.clone());
     }
@@ -220,20 +227,29 @@ mod tests {
     #[test]
     fn linked_sms_is_already_sent() {
         let ex = [linked(tx("b", "EXPENSE", "CARD", "60", "2026-09-21"), "G-1")];
-        assert_eq!(judge_default(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21")), Verdict::AlreadySent("b".into()));
+        assert_eq!(
+            judge_default(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21")),
+            Verdict::AlreadySent("b".into())
+        );
         // старая метка хранит guid очищенным
         let old = [linked(tx("b", "EXPENSE", "CARD", "60", "2026-09-21"), "p_0_AB-12")];
         let mut p = probe(Kind::Expense, "60", "CARD", "2026-09-21");
         p.guid = "p:0/AB-12".into();
         assert_eq!(judge_default(&old, &p), Verdict::AlreadySent("b".into()));
         // даже если пару искать не надо
-        assert_eq!(judge(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21"), 1, false, unknown), Verdict::AlreadySent("b".into()));
+        assert_eq!(
+            judge(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21"), 1, false, unknown),
+            Verdict::AlreadySent("b".into())
+        );
     }
 
     #[test]
     fn manual_entry_confirmed_by_other_sms_is_not_a_candidate() {
         let free = tx("a", "EXPENSE", "CARD", "60", "2026-09-21");
-        assert_eq!(judge_default(std::slice::from_ref(&free), &probe(Kind::Expense, "60.00", "CARD", "2026-09-21")), entered(&["a"]));
+        assert_eq!(
+            judge_default(std::slice::from_ref(&free), &probe(Kind::Expense, "60.00", "CARD", "2026-09-21")),
+            entered(&["a"])
+        );
         let taken = linked(free, "G-2");
         assert_eq!(judge_default(&[taken], &probe(Kind::Expense, "60", "CARD", "2026-09-21")), Verdict::New);
     }
@@ -251,11 +267,20 @@ mod tests {
         .unwrap();
         let side = |g: &str| (g == "G-out").then_some(Kind::Expense);
         // списание уже прикреплено: зачисление — кандидат
-        assert_eq!(judge(std::slice::from_ref(&t), &probe(Kind::Income, "120", "SAVE", "2026-09-20"), 1, true, side), entered(&["t"]));
+        assert_eq!(
+            judge(std::slice::from_ref(&t), &probe(Kind::Income, "120", "SAVE", "2026-09-20"), 1, true, side),
+            entered(&["t"])
+        );
         // второе списание на ту же сумму — нет
-        assert_eq!(judge(std::slice::from_ref(&t), &probe(Kind::Expense, "120", "CARD", "2026-09-20"), 1, true, side), Verdict::New);
+        assert_eq!(
+            judge(std::slice::from_ref(&t), &probe(Kind::Expense, "120", "CARD", "2026-09-20"), 1, true, side),
+            Verdict::New
+        );
         // сторона прикреплённого SMS неизвестна — считаем, что та же
-        assert_eq!(judge(std::slice::from_ref(&t), &probe(Kind::Income, "120", "SAVE", "2026-09-20"), 1, true, unknown), Verdict::New);
+        assert_eq!(
+            judge(std::slice::from_ref(&t), &probe(Kind::Income, "120", "SAVE", "2026-09-20"), 1, true, unknown),
+            Verdict::New
+        );
         // обе стороны прикреплены
         let both = linked(t, "G-in");
         let side = |g: &str| Some(if g == "G-out" { Kind::Expense } else { Kind::Income });
@@ -289,8 +314,14 @@ mod tests {
             "imessage",
         )
         .unwrap();
-        assert_eq!(judge_default(std::slice::from_ref(&t), &probe(Kind::Expense, "120", "CARD", "2026-09-20")), entered(&["t"]));
-        assert_eq!(judge_default(std::slice::from_ref(&t), &probe(Kind::Income, "100", "CASH", "2026-09-20")), entered(&["t"]));
+        assert_eq!(
+            judge_default(std::slice::from_ref(&t), &probe(Kind::Expense, "120", "CARD", "2026-09-20")),
+            entered(&["t"])
+        );
+        assert_eq!(
+            judge_default(std::slice::from_ref(&t), &probe(Kind::Income, "100", "CASH", "2026-09-20")),
+            entered(&["t"])
+        );
         assert_eq!(judge_default(&[t], &probe(Kind::Income, "120", "CASH", "2026-09-20")), Verdict::New);
     }
 
@@ -298,7 +329,10 @@ mod tests {
     fn refund_flips_direction() {
         let mut r = tx("r", "EXPENSE", "CARD", "60", "2026-09-21");
         r.refund = true;
-        assert_eq!(judge_default(std::slice::from_ref(&r), &probe(Kind::Expense, "60", "CARD", "2026-09-21")), Verdict::New);
+        assert_eq!(
+            judge_default(std::slice::from_ref(&r), &probe(Kind::Expense, "60", "CARD", "2026-09-21")),
+            Verdict::New
+        );
         assert_eq!(judge_default(&[r], &probe(Kind::Income, "60", "CARD", "2026-09-21")), entered(&["r"]));
     }
 
@@ -315,6 +349,9 @@ mod tests {
             tx("near-b", "EXPENSE", "CARD", "60", "2026-09-21"),
             tx("near-a", "EXPENSE", "CARD", "60", "2026-09-21"),
         ];
-        assert_eq!(judge_default(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21")), entered(&["near-a", "near-b", "far"]));
+        assert_eq!(
+            judge_default(&ex, &probe(Kind::Expense, "60", "CARD", "2026-09-21")),
+            entered(&["near-a", "near-b", "far"])
+        );
     }
 }
