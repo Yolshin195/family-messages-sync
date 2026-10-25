@@ -70,6 +70,11 @@ fn error_code(body: &str) -> Option<String> {
     serde_json::from_str::<Value>(body).ok()?["error"].as_str().map(str::to_string)
 }
 
+/// Поле ошибки из тела `{"error": …, "field": "<ПОЛЕ>"}`.
+fn error_field(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body).ok()?["field"].as_str().map(str::to_string)
+}
+
 /// Текст отказа для журнала: `message` (и `field`) из тела, иначе тело целиком.
 fn error_text(body: &str) -> String {
     let v: Value = serde_json::from_str(body).unwrap_or_default();
@@ -260,7 +265,16 @@ impl Ledger for Api {
 
     fn create(&self, payload: &Value) -> Result<Reply> {
         let path = "/api/transactions";
-        let (st, body) = self.send(Method::POST, path, &[], Some(payload))?;
+        let (mut st, mut body) = self.send(Method::POST, path, &[], Some(payload))?;
+        // Время из SMS по часам Mac пришлось на другой день по часам бухгалтерии (Mac в другом поясе) — без времени:
+        // операция важнее точного времени.
+        if st == 422 && error_field(&body).as_deref() == Some("occurred_at") && payload.get("occurred_at").is_some() {
+            let mut without = payload.clone();
+            if let Some(o) = without.as_object_mut() {
+                o.remove("occurred_at");
+            }
+            (st, body) = self.send(Method::POST, path, &[], Some(&without))?;
+        }
         match st {
             201 => Ok(Reply::Created(id_of(path, &body)?)),
             // прошлый запуск создал операцию, но ответ не дошёл
@@ -370,6 +384,16 @@ mod tests {
 
         let (api, _) = serve(vec![(422, r#"{"error":"VALIDATION","message":"категория AUTO_INCOME не найдена"}"#)]);
         assert_eq!(api.create(&payload()).unwrap(), Reply::Rejected("422 категория AUTO_INCOME не найдена".into()));
+
+        // Время другого дня по часам бухгалтерии — повтор без времени.
+        let other_day = r#"{"error":"VALIDATION","message":"время операции приходится на другой день","field":"occurred_at"}"#;
+        let (api, rx) = serve(vec![(422, other_day), (201, r#"{"id":"t2"}"#)]);
+        let timed = json!({"tx_kind": "EXPENSE", "occurred_at": "2026-09-21T23:50:00+03:00", "external_ref": ext()});
+        assert_eq!(api.create(&timed).unwrap(), Reply::Created("t2".into()));
+        let reqs: Vec<String> = rx.iter().take(2).collect();
+        assert!(reqs[0].contains("\"occurred_at\":\"2026-09-21T23:50") && !reqs[1].contains("\"occurred_at\":\"2026"), "{reqs:?}");
+        let (api, _) = serve(vec![(422, other_day)]);
+        assert!(matches!(api.create(&payload()).unwrap(), Reply::Rejected(_)), "без времени в запросе — не повторяем");
 
         let (api, _) = serve(vec![(409, r#"{"error":"CONFLICT","message":"что-то ещё","field":"items"}"#)]);
         assert_eq!(api.create(&payload()).unwrap(), Reply::Rejected("409 что-то ещё (items)".into()));

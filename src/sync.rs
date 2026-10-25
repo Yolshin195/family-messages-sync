@@ -2,7 +2,8 @@
 //! команды `show`, `log` и `status`.
 
 use anyhow::Result;
-use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, SubsecRound};
+use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat, SubsecRound, TimeZone};
+use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::{cell::RefCell, fs, io::Write, path::Path};
 
@@ -42,17 +43,33 @@ pub fn describe(cfg: &Config, p: &Parsed, account: &str, date: NaiveDate) -> Str
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Связь SMS с операцией: по ней бухгалтерия узнаёт уже отправленное сообщение.
-pub fn external_ref(cfg: &Config, msg: &Msg) -> Value {
-    json!({
+/// Связь SMS с операцией: по ней бухгалтерия узнаёт уже отправленное сообщение. С ней — время операции из текста
+/// SMS (`at`) и остаток счёта после операции: бухгалтерия ставит это время прикреплённой операции и сверяет остаток.
+pub fn external_ref(cfg: &Config, msg: &Msg, at: Option<DateTime<Local>>, balance: Option<(&str, Decimal)>) -> Value {
+    let mut v = json!({
         "provider": cfg.provider,
         "external_id": msg.guid,
         "received_at": msg.date.to_rfc3339_opts(SecondsFormat::Secs, false),
-    })
+    });
+    if let Some(at) = at {
+        v["occurred_at"] = json!(at.to_rfc3339_opts(SecondsFormat::Secs, false));
+    }
+    if let Some((account, amount)) = balance {
+        v["balance"] = json!(amount.to_string());
+        v["account_code"] = json!(account);
+    }
+    v
 }
 
-/// Тело `POST /api/transactions`.
-pub fn build_payload(cfg: &Config, p: &Parsed, msg: &Msg, account: &str, date: NaiveDate) -> Value {
+/// Тело `POST /api/transactions`. `at` — время операции (`operation_time`).
+pub fn build_payload(
+    cfg: &Config,
+    p: &Parsed,
+    msg: &Msg,
+    account: &str,
+    date: NaiveDate,
+    at: Option<DateTime<Local>>,
+) -> Value {
     let category = match p.kind {
         Kind::Expense => &cfg.expense_category,
         Kind::Income => &cfg.income_category,
@@ -70,8 +87,11 @@ pub fn build_payload(cfg: &Config, p: &Parsed, msg: &Msg, account: &str, date: N
         }],
         "description": describe(cfg, p, account, date),
         "description_lang": cfg.description_lang.to_uppercase(),
-        "external_ref": external_ref(cfg, msg),
+        "external_ref": external_ref(cfg, msg, at, p.balance.map(|b| (account, b))),
     });
+    if let Some(at) = at {
+        v["occurred_at"] = json!(at.to_rfc3339_opts(SecondsFormat::Secs, false));
+    }
     if let Some(place) = cfg.place_code.as_deref().filter(|s| !s.trim().is_empty()) {
         v["place_code"] = json!(place.trim().to_uppercase());
     }
@@ -85,6 +105,22 @@ pub fn build_payload(cfg: &Config, p: &Parsed, msg: &Msg, account: &str, date: N
 fn operation_date(m: &Matcher, msg: &Msg) -> NaiveDate {
     let received = msg.date.date_naive();
     m.text_date(&msg.text).filter(|d| *d <= received + Duration::days(1)).unwrap_or(received)
+}
+
+/// Время операции — по нему бухгалтерия ставит операции внутри дня. Из текста SMS (`25/10/26 14:27`, по часам Mac):
+/// оно точнее времени получения, SMS иногда приходит на несколько минут позже. Получено в ту же минуту — время
+/// получения, с секундами. Времени в тексте нет — время получения, если это тот же день; иначе неизвестно.
+fn operation_time(m: &Matcher, msg: &Msg) -> Option<DateTime<Local>> {
+    let date = operation_date(m, msg);
+    let text = m
+        .text_datetime(&msg.text)
+        .filter(|t| t.date() == date)
+        .and_then(|t| Local.from_local_datetime(&t).earliest());
+    match text {
+        Some(t) if msg.date >= t && msg.date - t < Duration::minutes(1) => Some(msg.date),
+        Some(t) => Some(t),
+        None => (msg.date.date_naive() == date).then_some(msg.date),
+    }
 }
 
 fn log_line(dir: &Path, file: &str, line: &str) -> Result<()> {
@@ -133,12 +169,16 @@ pub fn cmd_show(cfg: &Config, m: &Matcher, n: usize) -> Result<()> {
             None => println!("  -> не распознано"),
             Some(p) => {
                 let account = cfg.resolve_account(p.account_hint.as_deref());
+                let when = match operation_time(m, msg) {
+                    Some(at) => at.format("%Y-%m-%d %H:%M").to_string(),
+                    None => format!("{} (время неизвестно)", operation_date(m, msg)),
+                };
+                let balance = p.balance.map(|b| format!(" | остаток {b}")).unwrap_or_default();
                 println!(
-                    "  -> {} {} | счёт {} | дата {}",
+                    "  -> {} {} | счёт {} | {when}{balance}",
                     p.kind.tx_kind(),
                     p.amount,
                     account.as_deref().unwrap_or("НЕ ОПРЕДЕЛЁН (задайте default_account или accounts)"),
-                    operation_date(m, msg)
                 );
             }
         }
@@ -337,12 +377,19 @@ impl Run<'_> {
             e.reason = Some(format!("не определён счёт (цифры в SMS: {:?}); задайте default_account или accounts", p.account_hint));
             return Ok(Outcome::Done(Box::new(e)));
         };
-        (e.status, e.transaction_id, e.reason) = self.send(msg, &p, &account, date)?;
+        (e.status, e.transaction_id, e.reason) = self.send(msg, &p, &account, date, operation_time(self.m, msg))?;
         Ok(Outcome::Done(Box::new(e)))
     }
 
-    /// Найти SMS в бухгалтерии или ручную операцию для него, иначе создать.
-    fn send(&self, msg: &Msg, p: &Parsed, account: &str, date: NaiveDate) -> Result<(Status, Option<String>, Option<String>)> {
+    /// Найти SMS в бухгалтерии или ручную операцию для него, иначе создать. `at` — время операции.
+    fn send(
+        &self,
+        msg: &Msg,
+        p: &Parsed,
+        account: &str,
+        date: NaiveDate,
+        at: Option<DateTime<Local>>,
+    ) -> Result<(Status, Option<String>, Option<String>)> {
         let tol = self.cfg.date_tolerance_days.max(0);
         let mut existing = self.ledger.transactions_around(account, date - Duration::days(tol), date + Duration::days(tol))?;
         let probe = Probe { guid: msg.guid.clone(), kind: p.kind, amount: p.amount, account: account.to_string(), date };
@@ -364,7 +411,7 @@ impl Run<'_> {
             }
             Verdict::New if self.dry => Ok((Status::Created, None, None)),
             Verdict::Entered(ids) => {
-                let r = external_ref(self.cfg, msg);
+                let r = external_ref(self.cfg, msg, at, p.balance.map(|b| (account, b)));
                 for id in &ids {
                     match self.ledger.attach(id, &r)? {
                         // кандидата удалили, пока шла обработка: следующий
@@ -372,9 +419,9 @@ impl Run<'_> {
                         s => return Ok(outcome(s)),
                     }
                 }
-                Ok(outcome(self.ledger.create(&build_payload(self.cfg, p, msg, account, date))?))
+                Ok(outcome(self.ledger.create(&build_payload(self.cfg, p, msg, account, date, at))?))
             }
-            Verdict::New => Ok(outcome(self.ledger.create(&build_payload(self.cfg, p, msg, account, date))?)),
+            Verdict::New => Ok(outcome(self.ledger.create(&build_payload(self.cfg, p, msg, account, date, at))?)),
         }
     }
 
@@ -559,7 +606,13 @@ mod tests {
     }
 
     fn parsed() -> Parsed {
-        Parsed { kind: Kind::Expense, amount: Decimal::from_str("60.00").unwrap(), merchant: String::new(), account_hint: Some("5019".into()) }
+        Parsed {
+            kind: Kind::Expense,
+            amount: Decimal::from_str("60.00").unwrap(),
+            merchant: String::new(),
+            account_hint: Some("5019".into()),
+            balance: None,
+        }
     }
 
     fn cfg() -> Config {
@@ -586,6 +639,8 @@ mod tests {
         create: RefCell<Option<Reply>>,
         down: bool,
         calls: RefCell<Vec<String>>,
+        /// тела запросов на создание и прикрепление
+        sent: RefCell<Vec<Value>>,
     }
 
     impl Ledger for Fake {
@@ -599,11 +654,13 @@ mod tests {
         fn create(&self, payload: &Value) -> Result<Reply> {
             assert_eq!(payload["external_ref"]["provider"], "imessage");
             self.calls.borrow_mut().push("A2".into());
+            self.sent.borrow_mut().push(payload.clone());
             Ok(self.create.borrow().clone().unwrap_or(Reply::Created("new".into())))
         }
         fn attach(&self, id: &str, r: &Value) -> Result<Reply> {
             assert!(r["external_id"].as_str().is_some_and(|g| g.starts_with("G-")));
             self.calls.borrow_mut().push(format!("A3 {id}"));
+            self.sent.borrow_mut().push(r.clone());
             Ok(self.attach.get(id).cloned().unwrap_or(Reply::Matched(id.into())))
         }
     }
@@ -677,7 +734,7 @@ mod tests {
         let d = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
         let mut m = msg(WITHDRAWAL);
         m.guid = "p:0/4F1C".into();
-        let v = build_payload(&cfg, &parsed(), &m, "CARD", d);
+        let v = build_payload(&cfg, &parsed(), &m, "CARD", d, None);
         assert_eq!(v["tx_kind"], "EXPENSE");
         assert_eq!(v["account_code"], "CARD");
         assert_eq!(v["occurred_on"], "2026-09-21");
@@ -700,8 +757,51 @@ mod tests {
         let d = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
         let mut p = parsed();
         p.kind = Kind::Income;
-        let v = build_payload(&Config::default(), &p, &msg("x"), "CARD", d);
+        let v = build_payload(&Config::default(), &p, &msg("x"), "CARD", d, None);
         assert_eq!((v["tx_kind"].as_str(), v["items"][0]["category_code"].as_str()), (Some("INCOME"), Some("AUTO_INCOME")));
+    }
+
+    /// Время операции: из текста SMS; получено в ту же минуту — время получения с секундами; без времени в тексте —
+    /// время получения того же дня; текст другого дня без времени — время неизвестно.
+    #[test]
+    fn operation_time_prefers_text() {
+        let m = Matcher::new(&Config::default()).unwrap();
+        let local = |d: u32, h: u32, min: u32, s: u32| Local.with_ymd_and_hms(2026, 9, d, h, min, s).unwrap();
+        let got = |text: &str, received| operation_time(&m, &Msg { date: received, ..msg(text) });
+        // SMS пришло через 9 минут — время из текста
+        assert_eq!(got("21/09/26 10:50 Withdrawal 1.00", local(21, 10, 59, 12)), Some(local(21, 10, 50, 0)));
+        assert_eq!(got("21/09/26 10:50 Withdrawal 1.00", local(21, 10, 50, 34)), Some(local(21, 10, 50, 34)), "та же минута");
+        assert_eq!(got("Withdrawal 1.00", local(21, 10, 51, 7)), Some(local(21, 10, 51, 7)), "в тексте нет времени");
+        assert_eq!(got("20/09/26 Withdrawal 1.00", local(21, 0, 5, 0)), None, "другой день без времени");
+        assert_eq!(got("20/09/26 23:58 Withdrawal 1.00", local(21, 0, 5, 0)), Some(local(20, 23, 58, 0)), "вчерашняя покупка");
+    }
+
+    /// Время и остаток уходят и в тело операции, и в связь с SMS (её прикрепляют к ручной операции).
+    #[test]
+    fn payload_has_time_and_balance() {
+        let d = NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
+        let at = Local.with_ymd_and_hms(2026, 9, 21, 10, 50, 0).unwrap();
+        let p = Parsed { balance: Some(Decimal::from_str("8195.25").unwrap()), ..parsed() };
+        let v = build_payload(&Config::default(), &p, &msg(WITHDRAWAL), "CARD_KBANK", d, Some(at));
+        let iso = at.to_rfc3339_opts(SecondsFormat::Secs, false);
+        assert_eq!((v["occurred_at"].as_str(), v["external_ref"]["occurred_at"].as_str()), (Some(iso.as_str()), Some(iso.as_str())));
+        assert_eq!((&v["external_ref"]["balance"], &v["external_ref"]["account_code"]), (&json!("8195.25"), &json!("CARD_KBANK")));
+        let plain = build_payload(&Config::default(), &parsed(), &msg(WITHDRAWAL), "CARD", d, None);
+        assert!(plain.get("occurred_at").is_none());
+        for key in ["occurred_at", "balance", "account_code"] {
+            assert!(plain["external_ref"].get(key).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn run_sends_time_and_balance_when_attaching() {
+        let env = Env::new("attach-balance");
+        let fake = Fake { existing: vec![manual("a", "CARD_KBANK", "2026-09-21")], ..Fake::default() };
+        let e = done(env.run(&fake, false).process(&msg(WITHDRAWAL), &State::default(), false).unwrap());
+        assert_eq!((e.status, e.transaction_id.as_deref()), (Status::Matched, Some("a")));
+        let r = fake.sent.borrow()[0].clone();
+        let at = Local.with_ymd_and_hms(2026, 9, 21, 10, 50, 0).unwrap().to_rfc3339_opts(SecondsFormat::Secs, false);
+        assert_eq!((r["occurred_at"].as_str(), &r["balance"], &r["account_code"]), (Some(at.as_str()), &json!("8195.25"), &json!("CARD_KBANK")));
     }
 
     #[test]

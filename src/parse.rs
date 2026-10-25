@@ -1,7 +1,7 @@
 //! Разбор текста банковского SMS.
 
 use anyhow::{Context, Result, bail};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use regex::Regex;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -50,12 +50,21 @@ pub struct Parsed {
     pub merchant: String,
     /// последние цифры счёта из SMS (`A/C X-5019` → `5019`)
     pub account_hint: Option<String>,
+    /// остаток счёта после операции (`Outstanding Balance 8,195.25` → `8195.25`)
+    pub balance: Option<Decimal>,
 }
 
 pub struct Matcher {
     ignore: Vec<Regex>,
     rules: Vec<(Kind, Regex)>,
+    /// дата и необязательное время в начале SMS: `21/09/26 10:50`
     date: Regex,
+    balance: Option<Regex>,
+}
+
+/// Число из SMS: `8,195.25` → `8195.25`.
+fn number(s: &str) -> Option<Decimal> {
+    Decimal::from_str(&s.replace(',', "")).ok()
 }
 
 impl Matcher {
@@ -76,7 +85,18 @@ impl Matcher {
             }
             rules.push((kind, re));
         }
-        Ok(Self { ignore, rules, date: Regex::new(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")? })
+        let balance = match cfg.balance_pattern.trim() {
+            "" => None,
+            p => {
+                let re = Regex::new(p).with_context(|| format!("balance_pattern: {p}"))?;
+                if !re.capture_names().flatten().any(|n| n == "balance") {
+                    bail!("balance_pattern: в паттерне нет группы (?P<balance>...): {p}");
+                }
+                Some(re)
+            }
+        };
+        let date = Regex::new(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b(?:\s+(\d{1,2}):(\d{2})\b)?")?;
+        Ok(Self { ignore, rules, date, balance })
     }
 
     pub fn ignored(&self, text: &str) -> bool {
@@ -89,13 +109,14 @@ impl Matcher {
         }
         for (kind, re) in &self.rules {
             if let Some(c) = re.captures(text) {
-                let amount = Decimal::from_str(&c.name("amount")?.as_str().replace(',', "")).ok()?;
+                let amount = number(c.name("amount")?.as_str())?;
                 if amount <= Decimal::ZERO {
                     return None;
                 }
                 let merchant = c.name("merchant").map_or("", |m| m.as_str()).trim().to_string();
                 let account_hint = c.name("account").map(|m| m.as_str().to_string());
-                return Some(Parsed { kind: *kind, amount, merchant, account_hint });
+                let balance = self.balance.as_ref().and_then(|re| number(&re.captures(text)?["balance"]));
+                return Some(Parsed { kind: *kind, amount, merchant, account_hint, balance });
             }
         }
         None
@@ -112,6 +133,13 @@ impl Matcher {
             y -= 543; // буддийский год
         }
         NaiveDate::from_ymd_opt(y, m, d)
+    }
+
+    /// Дата и время операции из текста SMS (`21/09/26 10:50`) — по часам банка; времени нет — `None`.
+    pub fn text_datetime(&self, text: &str) -> Option<NaiveDateTime> {
+        let c = self.date.captures(text)?;
+        let time = NaiveTime::from_hms_opt(c.get(4)?.as_str().parse().ok()?, c.get(5)?.as_str().parse().ok()?, 0)?;
+        Some(self.text_date(text)?.and_time(time))
     }
 }
 
@@ -162,6 +190,32 @@ mod tests {
         let mut cfg = Config::default();
         cfg.rules[0].pattern = "withdrawal".into();
         assert!(Matcher::new(&cfg).is_err());
+    }
+
+    #[test]
+    fn balance_from_text() {
+        let m = matcher();
+        let p = m.parse("25/10/26 14:27 A/C X-6774 Withdrawal 38.20 Outstanding Balance 6,510.29 Baht.").unwrap();
+        assert_eq!((p.amount, p.balance), (dec("38.20"), Some(dec("6510.29"))));
+        let p = m.parse("A/C X-5019 Deposit 500.00 Avail Bal 1,000.00").unwrap();
+        assert_eq!(p.balance, Some(dec("1000.00")));
+        assert_eq!(m.parse("21/09/26 10:50 Withdrawal 60.00").unwrap().balance, None);
+        let mut cfg = Config { balance_pattern: String::new(), ..Config::default() };
+        let p = Matcher::new(&cfg).unwrap().parse("Withdrawal 1.00 Outstanding Balance 5.00 Baht").unwrap();
+        assert_eq!(p.balance, None, "пустой паттерн — остаток не ищется");
+        cfg.balance_pattern = "balance".into();
+        assert!(Matcher::new(&cfg).is_err(), "без группы balance");
+    }
+
+    #[test]
+    fn date_and_time_from_text() {
+        let m = matcher();
+        let at = |d: (i32, u32, u32), t: (u32, u32)| NaiveDate::from_ymd_opt(d.0, d.1, d.2).unwrap().and_hms_opt(t.0, t.1, 0);
+        assert_eq!(m.text_datetime("25/10/26 14:27 A/C X-6774 Withdrawal 38.20"), at((2026, 10, 25), (14, 27)));
+        assert_eq!(m.text_datetime("1/2/2569 9:05 x"), at((2026, 2, 1), (9, 5)));
+        assert_eq!(m.text_datetime("25/10/26 A/C X-6774"), None, "без времени");
+        assert_eq!(m.text_datetime("25/10/26 25:00 x"), None);
+        assert_eq!(m.text_date("25/10/26 14:27 x"), NaiveDate::from_ymd_opt(2026, 10, 25));
     }
 
     #[test]
