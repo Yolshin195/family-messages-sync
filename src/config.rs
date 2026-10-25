@@ -85,6 +85,9 @@ pub struct Config {
 
     /// Правила разбора, первое совпавшее побеждает
     pub rules: Vec<Rule>,
+    /// Остаток счёта после операции (`Outstanding Balance 8,195.25`): regex с группой `balance`. Остаток уходит в
+    /// бухгалтерию вместе с SMS, и она сверяет его с операциями. Пусто — не искать
+    pub balance_pattern: String,
 }
 
 impl Default for Config {
@@ -135,6 +138,8 @@ impl Default for Config {
                     pattern: r"(?i)(?:A/C\s+X-(?P<account>\d+)\s+)?\b(?:deposit|received|transfer in|credit)\w*\s+(?P<amount>\d[\d,]*\.\d{2})".into(),
                 },
             ],
+            // "... Outstanding Balance 8,195.25 Baht." / "Avail Bal 8,195.25"
+            balance_pattern: r"(?i)\b(?:outstanding\s+balance|avail(?:able)?\.?\s+bal(?:ance)?\.?)\s*:?\s*(?P<balance>-?\d[\d,]*\.\d{2})".into(),
         }
     }
 }
@@ -272,5 +277,6 @@ mod tests {
     fn new_config_fields_have_defaults() {
         let cfg: Config = serde_json::from_str(r#"{"default_account":"CARD"}"#).unwrap();
         assert_eq!((cfg.provider.as_str(), cfg.notify_created, cfg.old_message_days), ("imessage", true, 2));
+        assert!(cfg.balance_pattern.contains("(?P<balance>"), "старый конфиг получает разбор остатка");
     }
 }
